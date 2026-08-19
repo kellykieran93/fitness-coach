@@ -36,15 +36,19 @@ async def get_coach_response(user_id: str, message: str) -> str:
 
     # 2. Build system prompt
     system_prompt = f"""You are an elite, empathetic health and fitness coach with real-time location and web search capabilities.
-Your goal is to provide safe, highly personalized workout advice, meal planning, and outdoor recreation recommendations (hikes, parks, trail runs).
+Your goal is to provide safe, highly personalized workout advice, meal planning, and outdoor recreation recommendations.
 
 WHAT YOU KNOW ABOUT THIS USER FROM PAST SESSIONS:
 - {memory_context}
 
-Instructions:
-- Use the facts above to tailor your advice (e.g., respect injuries, food allergies, and preferences).
-- If the user asks for hikes, parks, or local outdoor spots, perform a live search to give real, accurate location details and safety tips.
-- Keep responses concise and practical.
+ALLTRAILS LOCATION INSTRUCTIONS:
+- Whenever the user asks for hikes, trail runs, or outdoor walks, prioritize findings specifically from AllTrails (alltrails.com).
+- Use live browser search to locate actual AllTrails links for each trail.
+- Format trail outputs cleanly using Telegram Markdown:
+  * **[Trail Name](AllTrails URL)**
+  * **Distance & Difficulty**: e.g., 3.2 miles | Easy
+  * **Trail Type**: Loop/Out & Back
+  * **Why it fits**: Explain how it respects user preferences or injuries (e.g., flat surface to avoid slips).
 """
 
     # 3. Request LLM completion from Groq with live browser search tool enabled
@@ -100,7 +104,30 @@ async def analyze_food_image(image_url: str) -> str:
         temperature=0.2,
     )
     return completion.choices[0].message.content
-# Telegram Webhook endpoint supporting photos and text
+    # Helper to convert Telegram voice note (.ogg) to text using Groq Whisper
+async def transcribe_telegram_voice(file_id: str) -> str:
+    async with httpx.AsyncClient() as client:
+        # 1. Get file path from Telegram
+        file_info = await client.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
+        )
+        file_path = file_info.json()["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+
+        # 2. Download audio bytes from Telegram
+        audio_response = await client.get(file_url)
+        audio_bytes = audio_response.content
+
+    # 3. Pass audio bytes directly to Groq Whisper API
+    transcription = groq_client.audio.transcriptions.create(
+        file=("voice.ogg", audio_bytes),
+        model="whisper-large-v3",
+        prompt="Fitness and nutrition context",
+        response_format="json",
+        language="en"
+    )
+    return transcription.text
+# Telegram Webhook endpoint supporting Voice, Photos, and Text
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
     try:
@@ -109,8 +136,33 @@ async def telegram_webhook(request: Request):
             message = data["message"]
             chat_id = str(message["chat"]["id"])
 
-            # 1. Handle Photo Uploads
-            if "photo" in message:
+            # 1. Handle Voice Notes
+            if "voice" in message or "audio" in message:
+                voice_data = message.get("voice") or message.get("audio")
+                file_id = voice_data["file_id"]
+
+                # Transcribe audio using Whisper
+                transcribed_text = await transcribe_telegram_voice(file_id)
+
+                # Process transcribed text through core AI + Mem0 memory engine
+                bot_response = await get_coach_response(chat_id, transcribed_text)
+
+                # Send response back to Telegram
+                reply_text = f"🎙️ *You said:* \"{transcribed_text}\"\n\n{bot_response}"
+                
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": reply_text,
+                            "parse_mode": "Markdown",
+                            "disable_web_page_preview": False
+                        }
+                    )
+
+            # 2. Handle Photo Uploads
+            elif "photo" in message:
                 file_id = message["photo"][-1]["file_id"]
                 
                 async with httpx.AsyncClient() as client:
@@ -133,10 +185,10 @@ async def telegram_webhook(request: Request):
                     reply_text = f"📸 **Nutrition Label Processed & Saved!**\n\n{macro_summary}"
                     await client.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": reply_text}
+                        json={"chat_id": chat_id, "text": reply_text, "parse_mode": "Markdown"}
                     )
 
-            # 2. Handle Regular Text Messages
+            # 3. Handle Regular Text Messages
             elif "text" in message:
                 user_text = message["text"]
                 bot_response = await get_coach_response(chat_id, user_text)
@@ -144,7 +196,12 @@ async def telegram_webhook(request: Request):
                 async with httpx.AsyncClient() as client:
                     await client.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": bot_response}
+                        json={
+                            "chat_id": chat_id, 
+                            "text": bot_response,
+                            "parse_mode": "Markdown",
+                            "disable_web_page_preview": False
+                        }
                     )
 
         return {"status": "ok"}
