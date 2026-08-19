@@ -4,9 +4,55 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from groq import Groq
 from mem0 import MemoryClient
+from mem0 import MemoryClient
+import sqlite3
+from datetime import date
 
 app = FastAPI(title="Personalized Fitness Coach API")
 
+# Initialize SQLite database for daily macros
+def init_db():
+    conn = sqlite3.connect("macros.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS food_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            log_date TEXT,
+            food_name TEXT,
+            calories INTEGER,
+            protein REAL,
+            carbs REAL,
+            fat REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# Helper to fetch today's total macros for a user
+def get_daily_macros(user_id: str) -> str:
+    conn = sqlite3.connect("macros.db")
+    cursor = conn.cursor()
+    today = str(date.today())
+    cursor.execute("""
+        SELECT SUM(calories), SUM(protein), SUM(carbs), SUM(fat), GROUP_CONCAT(food_name, ', ')
+        FROM food_logs WHERE user_id = ? AND log_date = ?
+    """, (user_id, today))
+    result = cursor.fetchone()
+    conn.close()
+
+    if not result or result[0] is None:
+        return "No macros logged for today yet!"
+    
+    cal, pro, carb, fat, items = result
+    return f"""📊 **Today's Macro Summary ({today}):**
+- **Items Logged:** {items}
+- **Calories:** {cal or 0} kcal
+- **Protein:** {pro or 0}g
+- **Carbs:** {carb or 0}g
+- **Fat:** {fat or 0}g"""
 # Initialize clients
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 mem0_client = MemoryClient(api_key=os.getenv("MEM0_API_KEY"))
@@ -188,22 +234,36 @@ async def telegram_webhook(request: Request):
                         json={"chat_id": chat_id, "text": reply_text, "parse_mode": "Markdown"}
                     )
 
-            # 3. Handle Regular Text Messages
+          # 3. Handle Regular Text Messages & Commands
             elif "text" in message:
-                user_text = message["text"]
-                bot_response = await get_coach_response(chat_id, user_text)
+                user_text = message["text"].strip()
+
+                # Check if user wants to view macros summary
+                if user_text.lower() in ["/macros", "/today"]:
+                    reply_text = get_daily_macros(chat_id)
+                
+                # Check if user wants to wipe memory
+                elif user_text.lower() in ["/reset", "/clear"]:
+                    try:
+                        mem0_client.delete_all(user_id=chat_id)
+                        reply_text = "🧹 **Memory Wiped!** Let's start fresh."
+                    except Exception as err:
+                        reply_text = f"Failed to clear memory: {err}"
+                
+                else:
+                    # Regular AI coach query
+                    reply_text = await get_coach_response(chat_id, user_text)
 
                 async with httpx.AsyncClient() as client:
                     await client.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                         json={
                             "chat_id": chat_id, 
-                            "text": bot_response,
+                            "text": reply_text,
                             "parse_mode": "Markdown",
                             "disable_web_page_preview": False
                         }
                     )
-
         return {"status": "ok"}
     except Exception as e:
         print(f"Webhook error: {e}")
