@@ -35,24 +35,26 @@ async def get_coach_response(user_id: str, message: str) -> str:
     memory_context = "\n- ".join(facts) if facts else "No prior history recorded yet."
 
     # 2. Build system prompt
-    system_prompt = f"""You are an elite, empathetic health and fitness coach.
-Your goal is to provide safe, highly personalized workout and nutrition advice.
+    system_prompt = f"""You are an elite, empathetic health and fitness coach with real-time location and web search capabilities.
+Your goal is to provide safe, highly personalized workout advice, meal planning, and outdoor recreation recommendations (hikes, parks, trail runs).
 
 WHAT YOU KNOW ABOUT THIS USER FROM PAST SESSIONS:
 - {memory_context}
 
 Instructions:
-- Use the facts above to tailor your advice (e.g., respect injuries, food allergies, and goals).
+- Use the facts above to tailor your advice (e.g., respect injuries, food allergies, and preferences).
+- If the user asks for hikes, parks, or local outdoor spots, perform a live search to give real, accurate location details and safety tips.
 - Keep responses concise and practical.
 """
 
-    # 3. Request LLM completion from Groq
+    # 3. Request LLM completion from Groq with live browser search tool enabled
     completion = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": message}
         ],
+        tools=[{"type": "browser_search"}],
         temperature=0.7,
     )
     bot_response = completion.choices[0].message.content
