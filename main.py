@@ -76,26 +76,75 @@ async def chat(request: ChatRequest):
         return {"response": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-# Telegram Webhook endpoint
+# Helper to extract nutrition macros from image URL
+async def analyze_food_image(image_url: str) -> str:
+    completion = groq_client.chat.completions.create(
+        model="llama-3.2-11b-vision-preview",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text", 
+                        "text": "Analyze this food packaging or nutrition label. Extract the food item name, serving size, calories, protein, carbs, and fat content. Keep the summary short and formatted as bullet points."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url}
+                    }
+                ]
+            }
+        ],
+        temperature=0.2,
+    )
+    return completion.choices[0].message.content
+# Telegram Webhook endpoint supporting photos and text
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
     try:
         data = await request.json()
-        if "message" in data and "text" in data["message"]:
-            chat_id = str(data["message"]["chat"]["id"])
-            user_text = data["message"]["text"]
+        if "message" in data:
+            message = data["message"]
+            chat_id = str(message["chat"]["id"])
 
-            # Generate AI response
-            bot_response = await get_coach_response(chat_id, user_text)
+            # 1. Handle Photo Uploads
+            if "photo" in message:
+                file_id = message["photo"][-1]["file_id"]
+                
+                async with httpx.AsyncClient() as client:
+                    file_info = await client.get(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
+                    )
+                    file_path = file_info.json()["result"]["file_path"]
+                    image_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
 
-            # Post response back to Telegram
-            if TELEGRAM_BOT_TOKEN:
+                    macro_summary = await analyze_food_image(image_url)
+
+                    mem0_client.add(
+                        messages=[
+                            {"role": "user", "content": "I ate/logged this food label photo."},
+                            {"role": "assistant", "content": macro_summary}
+                        ],
+                        user_id=chat_id
+                    )
+
+                    reply_text = f"📸 **Nutrition Label Processed & Saved!**\n\n{macro_summary}"
+                    await client.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                        json={"chat_id": chat_id, "text": reply_text}
+                    )
+
+            # 2. Handle Regular Text Messages
+            elif "text" in message:
+                user_text = message["text"]
+                bot_response = await get_coach_response(chat_id, user_text)
+
                 async with httpx.AsyncClient() as client:
                     await client.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                         json={"chat_id": chat_id, "text": bot_response}
                     )
+
         return {"status": "ok"}
     except Exception as e:
         print(f"Webhook error: {e}")
