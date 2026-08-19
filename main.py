@@ -17,12 +17,21 @@ class ChatRequest(BaseModel):
 @app.post("/chat")
 async def chat(request: ChatRequest):
     try:
-        # 1. Retrieve relevant long-term memories for this specific user
-        memory_response = mem0_client.search(query=request.message, user_id=request.user_id)
+        # 1. Retrieve relevant memories using updated Mem0 filters syntax
+        memory_response = mem0_client.search(
+            query=request.message, 
+            filters={"user_id": request.user_id}
+        )
         
-        # Format facts into a clean text block
-        memories_list = memory_response.get("results", [])
-        facts = [m["memory"] for m in memories_list] if isinstance(memories_list, list) else []
+        # Format extracted facts safely regardless of response format
+        if isinstance(memory_response, dict):
+            memories_list = memory_response.get("results", [])
+        elif isinstance(memory_response, list):
+            memories_list = memory_response
+        else:
+            memories_list = []
+            
+        facts = [m["memory"] for m in memories_list if isinstance(m, dict) and "memory" in m]
         memory_context = "\n- ".join(facts) if facts else "No prior history recorded yet."
 
         # 2. Build system prompt with retrieved long-term memory context
@@ -48,7 +57,7 @@ Instructions:
         )
         bot_response = completion.choices[0].message.content
 
-        # 4. Save message pair to Mem0 (Mem0 automatically extracts new facts behind the scenes)
+        # 4. Save message pair to Mem0
         messages_to_add = [
             {"role": "user", "content": request.message},
             {"role": "assistant", "content": bot_response}
